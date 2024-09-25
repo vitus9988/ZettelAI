@@ -1,10 +1,10 @@
 import pandas as pd
 import torch
-from datasets import Dataset, load_dataset
+from datasets import Dataset, DatasetDict
 from transformers import DataCollatorForSeq2Seq,AutoTokenizer, AutoModelForCausalLM, BitsAndBytesConfig
 from peft import LoraConfig
 from trl import SFTTrainer, SFTConfig
-
+from sklearn.model_selection import train_test_split
 
 bnb_config = BitsAndBytesConfig(
     load_in_4bit=True,
@@ -20,28 +20,36 @@ tokenizer = AutoTokenizer.from_pretrained(BASE_MODEL)
 tokenizer.pad_token = tokenizer.eos_token
 tokenizer.padding_side = 'right'
 
-data_files = {'train':"train.csv", 'test':'test.csv'}
+
+def load_and_split_data(file_path, column, threshold, test_size=0.2):
+    csv_data = pd.read_csv(file_path)
+    filtered_data = csv_data[csv_data[column] >= threshold]
+    train_data, test_data = train_test_split(filtered_data, test_size=test_size)
+    train_dataset = Dataset.from_pandas(train_data.reset_index(drop=True))
+    test_dataset = Dataset.from_pandas(test_data.reset_index(drop=True))
+    
+    return train_dataset, test_dataset
 
 
+file_path = "DATASET.csv"
 
-dataset = load_dataset("csv",data_files=data_files)
+train_dataset, test_dataset = load_and_split_data(file_path, 'value', 8.5)
+
+dataset = DatasetDict({
+    'train': train_dataset,
+    'test': test_dataset
+})
 
 
 def preprocess_function(examples):
-    # 입력과 레이블을 데이터셋에서 가져옵니다.
     inputs = examples['instruction']
     labels = examples['output']
     
-    # 입력을 토큰화합니다.
     model_inputs = tokenizer(inputs, padding="max_length", truncation=True, max_length=2048)
-    
-    # 레이블을 토큰화합니다.
     label_tokens = tokenizer(labels, padding="max_length", truncation=True, max_length=2048)
     
-    # 레이블의 토큰 ID를 모델 입력에 추가합니다.
     model_inputs["labels"] = label_tokens["input_ids"]
     
-    # 레이블에서 패딩 토큰을 -100으로 대체하여 손실 계산 시 무시되도록 합니다.
     for i, label in enumerate(model_inputs["labels"]):
         model_inputs["labels"][i] = [
             token_id if token_id != tokenizer.pad_token_id else -100 for token_id in label
@@ -49,14 +57,12 @@ def preprocess_function(examples):
     
     return model_inputs
 
-# 데이터셋에 전처리 함수를 적용합니다.
 tokenized_datasets = dataset.map(
     preprocess_function,
     batched=True,
     remove_columns=dataset["train"].column_names
 )
 
-# Data Collator 설정
 data_collator = DataCollatorForSeq2Seq(
     tokenizer,
     model=model,
@@ -112,11 +118,7 @@ trainer = SFTTrainer(
         data_collator=data_collator,
     )
 
-
-
-
 trainer.train()
-
 
 model.save_pretrained("./zettelAI")
 tokenizer.save_pretrained("./zettelAI")
