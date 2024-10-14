@@ -1,5 +1,5 @@
 # ZettelAI
-[2024 Gemma 파인튜닝톤 (아이디어톤)](https://aifactory.space/task/2733/overview)에 참가한 "사용자 메모 데이터를 활용한 제텔카스텐 구현" 관련 소스코드 저장소입니다.
+[2024 Gemma 파인튜닝톤 (아이디어톤)](https://aifactory.space/task/2733/overview) "사용자 메모 데이터를 활용한 제텔카스텐 구현" 관련 소스코드 저장소입니다.
 
 ## 데이터 생성
 
