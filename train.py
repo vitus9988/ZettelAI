@@ -1,32 +1,40 @@
 import torch
 from datasets import Dataset, DatasetDict
-from transformers import AutoTokenizer, AutoModelForCausalLM, BitsAndBytesConfig, TrainingArguments
-from peft import LoraConfig, get_peft_model
+from transformers import AutoTokenizer, AutoModelForCausalLM, TrainingArguments, BitsAndBytesConfig
+from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
 from trl import SFTConfig, SFTTrainer, DataCollatorForCompletionOnlyLM
 import pandas as pd
 from sklearn.model_selection import train_test_split
+import os
 
-bnb_config = BitsAndBytesConfig(
-    load_in_4bit=True,
-    bnb_4bit_quant_type="nf4",
-    bnb_4bit_compute_dtype=torch.bfloat16
-)
+os.environ["NCCL_P2P_DISABLE"] = "1"
+os.environ["NCCL_IB_DISABLE"] = "1"
 
+torch_dtype=torch.float16
+quant_config = BitsAndBytesConfig(
+        load_in_4bit=True,
+        bnb_4bit_quant_type="nf4",
+        bnb_4bit_compute_dtype=torch_dtype,
+        bnb_4bit_use_double_quant=True,
+    )
+
+
+
+# LoRA 설정 구성
 lora_config = LoraConfig(
     r=6,
-    lora_alpha = 8,
-    lora_dropout = 0.05,
+    lora_alpha=8,
+    lora_dropout=0.05,
+    bias="none",
     target_modules=["q_proj", "o_proj", "k_proj", "v_proj", "gate_proj", "up_proj", "down_proj"],
     task_type="CAUSAL_LM",
 )
 
 BASE_MODEL = "google/gemma-2-9b-it"
-
-model = AutoModelForCausalLM.from_pretrained(BASE_MODEL, device_map="auto", quantization_config=bnb_config)
-tokenizer = AutoTokenizer.from_pretrained(BASE_MODEL)
-tokenizer.pad_token = tokenizer.eos_token
-tokenizer.padding_side = 'right'
-
+model = AutoModelForCausalLM.from_pretrained(BASE_MODEL, device_map="auto", quantization_config=quant_config, attn_implementation="eager")
+tokenizer = AutoTokenizer.from_pretrained(BASE_MODEL,trust_remote_code = True)
+model = get_peft_model(model, lora_config)
+model.config.use_cache = False
 
 def load_and_split_data(file_path, column, threshold, test_size=0.2):
     csv_data = pd.read_csv(file_path)
@@ -35,7 +43,6 @@ def load_and_split_data(file_path, column, threshold, test_size=0.2):
     train_dataset = Dataset.from_pandas(train_data.reset_index(drop=True))
     test_dataset = Dataset.from_pandas(test_data.reset_index(drop=True))
     return train_dataset, test_dataset
-
 
 file_path = "./dataset/sample_measured_dataset.csv"
 
@@ -46,7 +53,7 @@ Q3 = df['value'].quantile(0.75)
 
 IQR = Q3 - Q1
 lower_bound = Q1 - 1.5 * IQR
-
+lower_bound = lower_bound
 train_dataset, test_dataset = load_and_split_data(file_path, 'value', lower_bound)
 
 dataset = DatasetDict({
@@ -54,51 +61,68 @@ dataset = DatasetDict({
     'test': test_dataset
 })
 
-
+# 프롬프트 생성 함수 정의
 def generate_prompt(example):
     prompt_list = []
     for i in range(len(example['instruction'])):
-        prompt_list.append(r"""<bos><start_of_turn>user
-아래의 두 메모의 메모내용을 읽고 파악하여 각 메모로부터 키워드를 찾고 이를 통해 새로운 개념이나 아이디어를 200글자 이하로 도출하세요.
-추출한 키워드에 대한 설명없이 새로운 개념이나 아이디어만을 출력하세요.:
-{}<end_of_turn>
-<start_of_turn>model
-{}<end_of_turn><eos>""".format(example['instruction'][i], example['output'][i]))
+        prompt_list.append(
+                f"""<bos><start_of_turn>user
+                {example['instruction'][i]}
+                <end_of_turn>
+                <start_of_turn>model
+                {example['output'][i]}<end_of_turn><eos>"""
+                )
+
     return prompt_list
 
 train_data = dataset['train']
 test_data = dataset['test']
 
-trainer = SFTTrainer(
-    model=model,
-    train_dataset=train_data,
-    eval_dataset=test_data,
-    max_seq_length=2048,
-    args=TrainingArguments(
-        output_dir="outputs",
-        num_train_epochs = 3,
-        #max_steps=3000,
+
+training_args = SFTConfig(
+        output_dir="./results",
+        overwrite_output_dir=True,
+        do_train=True,
+        do_eval=True,
+        eval_strategy="steps",
         per_device_train_batch_size=1,
         per_device_eval_batch_size=1,
-        gradient_accumulation_steps=4,
-        optim="paged_adamw_8bit",
-        warmup_steps=20,
-        eval_strategy="steps",
-        eval_steps=100,
-        save_steps=100,
-        save_total_limit=2,
+        gradient_accumulation_steps=64,
         learning_rate=2e-4,
-        bf16=True,
-        logging_steps=100,
-        push_to_hub=False,
-        report_to='none',
-    ),
-    peft_config=lora_config,
-    formatting_func=generate_prompt,
+        weight_decay=0.01,
+        num_train_epochs=1,
+        #max_steps=-1,
+        lr_scheduler_type="cosine",
+        warmup_steps=20,
+        log_level="info",
+        logging_steps=20,
+        save_strategy="steps",
+        bf16=False,
+        fp16=False,
+        seed=42,
+        max_seq_length=1024,
+        optim="paged_adamw_8bit",
+        packing= False
 )
 
+
+
+
+trainer = SFTTrainer(
+        model=model,
+        peft_config=lora_config,
+        tokenizer=tokenizer,
+        args=training_args,
+        train_dataset=train_data,
+        eval_dataset=test_data,
+        formatting_func=generate_prompt
+)
+
+
+# 모델 트레이닝
 trainer.train()
 
+# LoRA 어댑터 저장
 ADAPTER_MODEL = "zettel_adapter"
-
 trainer.save_model(ADAPTER_MODEL)
+
