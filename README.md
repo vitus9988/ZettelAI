@@ -1,6 +1,9 @@
 # ZettelAI
 [2024 Gemma 파인튜닝톤 (아이디어톤)](https://aifactory.space/task/2733/overview) "사용자 메모 데이터를 활용한 제텔카스텐 구현" 관련 소스코드 저장소입니다.
 
+<img width="826" alt="image" src="https://github.com/user-attachments/assets/c6e16c1b-e496-4177-82bb-b692e4ca21fe">
+
+
 ## 데이터 생성
 
 1. 사전에 구성한 대주제 및 소주제 entity를 사용, gpt-4o-mini API를 통해 [초기 데이터셋](https://huggingface.co/datasets/vitus9988/ko_gpt4omini_note_15.4k)을 구축합니다. (make_dataset_by_entity.py)
